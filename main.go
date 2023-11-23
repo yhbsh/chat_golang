@@ -7,7 +7,6 @@ import (
 
 type Client struct {
 	conn net.Conn
-	ch   chan []byte
 }
 
 func main() {
@@ -18,28 +17,30 @@ func main() {
 	}
 	defer ln.Close()
 
+	clients := make(map[net.Conn]bool)
+	messages := make(chan string)
 	newClients := make(chan Client)
 	deadClients := make(chan Client)
-	messages := make(chan []byte)
 
+	// Handle new messages and client connections/disconnections
 	go func() {
-		clients := make(map[net.Conn]Client)
 		for {
 			select {
 			case msg := <-messages:
-				// Broadcast message to all clients
-				for _, cli := range clients {
-					cli.ch <- msg
+				// Broadcast the message to all clients
+				for conn := range clients {
+					fmt.Fprint(conn, msg)
 				}
-			case newCli := <-newClients:
+
+			case newClient := <-newClients:
 				// Add new client
-				clients[newCli.conn] = newCli
-				fmt.Printf("[INFO]: client connected from: %s\n", newCli.conn.RemoteAddr().String())
-			case deadCli := <-deadClients:
-				// Remove client
-				delete(clients, deadCli.conn)
-				close(deadCli.ch)
-				fmt.Printf("[INFO]: client disconnected from: %s\n", deadCli.conn.RemoteAddr().String())
+				clients[newClient.conn] = true
+				fmt.Printf("[INFO]: client connected from: %s\n", newClient.conn.RemoteAddr().String())
+
+			case deadClient := <-deadClients:
+				// Remove disconnected client
+				delete(clients, deadClient.conn)
+				fmt.Printf("[INFO]: client disconnected from: %s\n", deadClient.conn.RemoteAddr().String())
 			}
 		}
 	}()
@@ -51,28 +52,24 @@ func main() {
 			continue
 		}
 
-		clientCh := make(chan []byte)
-		client := Client{conn, clientCh}
-		newClients <- client
-
-		go handleConnection(client, messages, deadClients)
+		newClients <- Client{conn: conn}
+		go handleConnection(conn, messages, deadClients)
 	}
 }
 
-func handleConnection(client Client, messages chan []byte, deadClients chan Client) {
+func handleConnection(conn net.Conn, messages chan<- string, deadClients chan<- Client) {
 	defer func() {
-		deadClients <- client
-		client.conn.Close()
+		deadClients <- Client{conn: conn}
+		conn.Close()
 	}()
 
 	buffer := make([]byte, 1024)
 
 	for {
-		n, err := client.conn.Read(buffer)
+		n, err := conn.Read(buffer)
 		if err != nil {
 			return
 		}
-
-		messages <- buffer[:n]
+		messages <- string(buffer[:n])
 	}
 }
