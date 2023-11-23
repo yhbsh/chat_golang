@@ -3,13 +3,12 @@ package main
 import (
 	"fmt"
 	"net"
-	"sync"
 )
 
-var (
-	clients = make([]net.Conn, 0)
-	mu      sync.Mutex // Mutex to protect access to clients slice
-)
+type Client struct {
+	conn net.Conn
+	ch   chan []byte
+}
 
 func main() {
 	ln, err := net.Listen("tcp", ":8080")
@@ -19,6 +18,32 @@ func main() {
 	}
 	defer ln.Close()
 
+	newClients := make(chan Client)
+	deadClients := make(chan Client)
+	messages := make(chan []byte)
+
+	go func() {
+		clients := make(map[net.Conn]Client)
+		for {
+			select {
+			case msg := <-messages:
+				// Broadcast message to all clients
+				for _, cli := range clients {
+					cli.ch <- msg
+				}
+			case newCli := <-newClients:
+				// Add new client
+				clients[newCli.conn] = newCli
+				fmt.Printf("[INFO]: client connected from: %s\n", newCli.conn.RemoteAddr().String())
+			case deadCli := <-deadClients:
+				// Remove client
+				delete(clients, deadCli.conn)
+				close(deadCli.ch)
+				fmt.Printf("[INFO]: client disconnected from: %s\n", deadCli.conn.RemoteAddr().String())
+			}
+		}
+	}()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -26,50 +51,28 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("[INFO]: client connected from: %s\n", conn.RemoteAddr().String())
+		clientCh := make(chan []byte)
+		client := Client{conn, clientCh}
+		newClients <- client
 
-		go handleConnection(conn)
+		go handleConnection(client, messages, deadClients)
 	}
 }
 
-func handleConnection(conn net.Conn) {
-	defer conn.Close()
-	defer removeClient(conn)
+func handleConnection(client Client, messages chan []byte, deadClients chan Client) {
+	defer func() {
+		deadClients <- client
+		client.conn.Close()
+	}()
 
 	buffer := make([]byte, 1024)
 
-	addClient(conn)
-
 	for {
-		n, err := conn.Read(buffer)
+		n, err := client.conn.Read(buffer)
 		if err != nil {
-			fmt.Println(err)
-			return // Exit the loop if an error occurs
+			return
 		}
 
-		mu.Lock()
-		for _, c := range clients {
-			if c != conn { // Avoid sending the message back to the sender
-				c.Write(buffer[:n]) // Send only the actual data read
-			}
-		}
-		mu.Unlock()
+		messages <- buffer[:n]
 	}
-}
-
-func addClient(conn net.Conn) {
-	mu.Lock()
-	clients = append(clients, conn)
-	mu.Unlock()
-}
-
-func removeClient(conn net.Conn) {
-	mu.Lock()
-	for i, c := range clients {
-		if c == conn {
-			clients = append(clients[:i], clients[i+1:]...)
-			break
-		}
-	}
-	mu.Unlock()
 }
